@@ -4,7 +4,7 @@ a Dask cluster, taking into account the inter-``Node`` dependencies.
 """
 from typing import Any, Dict
 
-from distributed import Client, as_completed
+from distributed import Client, as_completed, worker_client
 from kedro.io import AbstractDataSet, DataCatalog
 from kedro.pipeline import Pipeline
 from kedro.pipeline.node import Node
@@ -15,21 +15,24 @@ class _DaskDataSet(AbstractDataSet):
     """``_DaskDataSet`` publishes/gets named datasets to/from the Dask
     scheduler."""
 
-    def __init__(self, client: Client, name: str):
-        self._client = client
+    def __init__(self, name: str):
         self._name = name
 
     def _load(self) -> Any:
-        return self._client.get_dataset(self._name)
+        with worker_client() as client:
+            return client.get_dataset(self._name)
 
     def _save(self, data: Any) -> None:
-        self._client.publish_dataset(data, name=self._name)
+        with worker_client() as client:
+            client.publish_dataset(data, name=self._name)
 
     def _exists(self) -> bool:
-        return self._name in self._client.list_datasets()
+        with worker_client() as client:
+            return self._name in client.list_datasets()
 
     def _release(self) -> None:
-        self._client.unpublish_dataset(self._name)
+        with worker_client() as client:
+            client.unpublish_dataset(self._name)
 
     def _describe(self) -> Dict[str, Any]:
         return dict(name=self._name)
@@ -51,10 +54,10 @@ class DaskRunner(AbstractRunner):
                 asynchronously with threads. Defaults to False.
         """
         super().__init__(is_async=is_async)
-        self._client = Client(**client_args)
+        Client(**client_args)
 
     def __del__(self):
-        self._client.close()
+        Client.current().close()
 
     def create_default_data_set(self, ds_name: str) -> _DaskDataSet:
         """Factory method for creating the default data set for the runner.
@@ -66,7 +69,7 @@ class DaskRunner(AbstractRunner):
             An instance of ``_DaskDataSet`` to be used for all
             unregistered data sets.
         """
-        return _DaskDataSet(self._client, ds_name)
+        return _DaskDataSet(ds_name)
 
     def _run_node(
         self,
@@ -104,11 +107,12 @@ class DaskRunner(AbstractRunner):
         node_dependencies = pipeline.node_dependencies
         node_futures = {}
 
+        client = Client.current()
         for node in nodes:
             dependencies = (
                 node_futures[dependency] for dependency in node_dependencies[node]
             )
-            node_futures[node] = self._client.submit(
+            node_futures[node] = client.submit(
                 self._run_node, node, catalog, self._is_async, run_id, *dependencies
             )
 
