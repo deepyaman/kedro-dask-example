@@ -1,4 +1,6 @@
 black==21.5b1
+dask
+distributed
 flake8>=3.7.9, <4.0
 ipython~=7.10
 isort~=5.0
