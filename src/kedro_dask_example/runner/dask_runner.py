@@ -2,6 +2,8 @@
 used to distribute execution of ``Node``s in the ``Pipeline`` across
 a Dask cluster, taking into account the inter-``Node`` dependencies.
 """
+from collections import Counter
+from itertools import chain
 from typing import Any, Dict
 
 from distributed import Client, as_completed, worker_client
@@ -24,15 +26,14 @@ class _DaskDataSet(AbstractDataSet):
 
     def _save(self, data: Any) -> None:
         with worker_client() as client:
-            client.publish_dataset(data, name=self._name)
+            client.publish_dataset(data, name=self._name, override=True)
 
     def _exists(self) -> bool:
         with worker_client() as client:
             return self._name in client.list_datasets()
 
     def _release(self) -> None:
-        with worker_client() as client:
-            client.unpublish_dataset(self._name)
+        Client.current().unpublish_dataset(self._name)
 
     def _describe(self) -> Dict[str, Any]:
         return dict(name=self._name)
@@ -60,14 +61,14 @@ class DaskRunner(AbstractRunner):
         Client.current().close()
 
     def create_default_data_set(self, ds_name: str) -> _DaskDataSet:
-        """Factory method for creating the default data set for the runner.
+        """Factory method for creating the default dataset for the runner.
 
         Args:
-            ds_name: Name of the missing data set.
+            ds_name: Name of the missing dataset.
 
         Returns:
             An instance of ``_DaskDataSet`` to be used for all
-            unregistered data sets.
+            unregistered datasets.
         """
         return _DaskDataSet(ds_name)
 
@@ -96,7 +97,6 @@ class DaskRunner(AbstractRunner):
 
         Returns:
             The node argument.
-
         """
         return run_node(node, catalog, is_async, run_id)
 
@@ -104,6 +104,7 @@ class DaskRunner(AbstractRunner):
         self, pipeline: Pipeline, catalog: DataCatalog, run_id: str = None
     ) -> None:
         nodes = pipeline.nodes
+        load_counts = Counter(chain.from_iterable(n.inputs for n in nodes))
         node_dependencies = pipeline.node_dependencies
         node_futures = {}
 
@@ -121,3 +122,20 @@ class DaskRunner(AbstractRunner):
         ):
             self._logger.info("Completed node: %s", node.name)
             self._logger.info("Completed %d out of %d tasks", i + 1, len(nodes))
+
+            # Decrement load counts, and release any datasets we
+            # have finished with. This is particularly important
+            # for the shared, default datasets we created above.
+            for data_set in node.inputs:
+                load_counts[data_set] -= 1
+                if (
+                    load_counts[data_set] < 1
+                    and data_set not in pipeline.inputs()
+                ):
+                    catalog.release(data_set)
+            for data_set in node.outputs:
+                if (
+                    load_counts[data_set] < 1
+                    and data_set not in pipeline.outputs()
+                ):
+                    catalog.release(data_set)
