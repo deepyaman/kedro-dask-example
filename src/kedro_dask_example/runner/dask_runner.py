@@ -21,8 +21,13 @@ class _DaskDataSet(AbstractDataSet):
         self._name = name
 
     def _load(self) -> Any:
-        with worker_client() as client:
-            return client.get_dataset(self._name)
+        try:
+            with worker_client() as client:
+                return client.get_dataset(self._name)
+        except ValueError:
+            # Upon successfully executing the pipeline, the runner loads
+            # free outputs on the scheduler (as opposed to on a worker).
+            Client.current().get_dataset(self._name)
 
     def _save(self, data: Any) -> None:
         with worker_client() as client:
@@ -127,16 +132,10 @@ class DaskRunner(AbstractRunner):
             # for the shared, default datasets we created above.
             for data_set in node.inputs:
                 load_counts[data_set] -= 1
-                if (
-                    load_counts[data_set] < 1
-                    and data_set not in pipeline.inputs()
-                ):
+                if load_counts[data_set] < 1 and data_set not in pipeline.inputs():
                     catalog.release(data_set)
             for data_set in node.outputs:
-                if (
-                    load_counts[data_set] < 1
-                    and data_set not in pipeline.outputs()
-                ):
+                if load_counts[data_set] < 1 and data_set not in pipeline.outputs():
                     catalog.release(data_set)
 
     def run_only_missing(
@@ -171,7 +170,8 @@ class DaskRunner(AbstractRunner):
         # Some of the unregistered datasets could have been published to
         # the scheduler in a previous run, so we need not recreate them.
         missing_unregistered_ds = {
-            ds_name for ds_name in unregistered_ds
+            ds_name
+            for ds_name in unregistered_ds
             if not self.create_default_data_set(ds_name).exists()
         }
         output_to_unregistered = pipeline.only_nodes_with_outputs(
