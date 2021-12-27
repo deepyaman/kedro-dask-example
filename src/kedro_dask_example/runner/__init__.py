@@ -1,1 +1,3 @@
-from .dask_runner import DaskRunner  # NOQA
+from .dask_runner import DaskRunner
+
+__all__ = ["DaskRunner"]
